@@ -24,11 +24,11 @@ var (
 	rabbitConn *amqp.Connection
 	rabbitCh   *amqp.Channel
 	db         *sql.DB
+	stmt       *sql.Stmt
 
 	insertDBMsg = func(data TelemetryData, parsedTime time.Time) error {
-		_, err := db.Exec(
-			`INSERT INTO telemetry_data (device_id, recorded_at, sensor_type, reading_nature, value) 
-			VALUES ($1, $2, $3, $4, $5)`,
+		// Use prepared statement for significantly faster repeated inserts
+		_, err := stmt.Exec(
 			data.DeviceID, parsedTime, data.SensorType, data.ReadingNature, data.Value,
 		)
 		return err
@@ -99,6 +99,12 @@ func initDB() {
 		log.Println("Consumer - Database not ready, retrying...")
 		time.Sleep(2 * time.Second)
 	}
+
+	// Prepare the statement once to save Postgres parsing overhead on every insert
+	stmt, err = db.Prepare(`INSERT INTO telemetry_data (device_id, recorded_at, sensor_type, reading_nature, value) VALUES ($1, $2, $3, $4, $5)`)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func processMessage(body []byte) (bool, bool) {
@@ -123,7 +129,7 @@ func processMessage(body []byte) (bool, bool) {
 }
 
 func startConsumer() {
-	// Set prefetch count to allow RabbitMQ to send messages in batches, 
+	// Set prefetch count to allow RabbitMQ to send messages in batches,
 	// preventing the consumer from being starved or overwhelmed.
 	err := rabbitCh.Qos(
 		1000,  // prefetch count

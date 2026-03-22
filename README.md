@@ -2,7 +2,7 @@
 
 Esta aplicação é um backend distribuído desenvolvido em Go focado em lidar com cenários de intenso tráfego de dados de telemetria emitidos por Sensores Industriais. Utilizando uma arquitetura orientada a eventos (Event-Driven), um padrão Pub/Sub e persistência transacional, este sistema garante baixo tempo de resposta em chamadas engarrafadas e previne vazamento de dados, promovendo escalabilidade, durabilidade e resiliência.
 
-## 🏗️ Design e Arquitetura
+## Design e Arquitetura
 
 O ecossistema é baseado no paradigma do desacoplamento de serviços, o que permite o balanceamento de consumo de banco de dados e livra o endpoint principal da dependência sincrona transacional.
 
@@ -56,20 +56,45 @@ O ecossistema é baseado no paradigma do desacoplamento de serviços, o que perm
 3. **Worker Independente (`consumer`):** Possui sua própria virtualização separada da API principal, visando flexibilidade de escala se houver fila em demasiado acúmulo temporário. O software realiza o pre-fetch da fila, lê as informações, as consolida e submete a insert em modelo atômico dentro do banco de dados, reportando falhas através de `Nack(requeue=true)` em caso de não alcance da database.
 4. **Relacional Database (`db`):** Armazena de fato as requisições, modelado para suportar `SensorTypes` variáveis sob timestamp de gravação.
 
-## 📄 Guia de Instalação e Testes
+## Guia de Instalação e Testes
 
 Todo manual de execução Docker, passos a passos para uso e métodos de testes (Manuais, Testes Unitários de Ambiente e Estresse por K6) foram segregados para um documento a parte e muito mais sucinto.
 
-🔗 **Acesse as instruções em [Comandos de Execução e Testes (RUN.md)](./RUN.md)**
+**Acesse as instruções em [Comandos de Execução e Testes (RUN.md)](./RUN.md)**
 
-## 📊 Relatório e Análise Experimental sob Estresse (K6)
+## Relatório e Análise Experimental sob Estresse (K6)
 
 Para justificar a topologia, o K6 propõe injetar instabilidades com dezenas de virtuais usuários, onde as respostas do comportamento tornam-se críticas para o sistema. O modelo atual gera as seguintes defesas e constatações perante picos:
 
 1. **Throughput e Latência Otimizados:** O uso de goroutines internas para multiplexar o Gin framework atrelado à conversão serializável imediata para protocolo AMQP causa respostas na ordem da fração de Milissegundos em requisições, deixando a métrica *http_req_duration* estonteante. O banco de dados (o agente mais lento) passa a ser secundário em tempos de resposta.
 2. **Prevenção de Timeout em Cenários Fechados:** Como a gravação não foi condicionada a dependência síncrona aos locks e transações pesadas do PostgreSQL (isolados por tabela e pools de TCP), o "Circuit Breaker" dos sensores remotos nunca será atingido (virtualização de latência 0), contendo quebra de envio original e repetições duplas indesejadas pelo dispositivo fonte.
 3. **Observação de Isolamento de Recursos Reais:** O `docker-compose.yml` provê uma isolação restritiva por CPU (limitados em frações de vCPU como `0.25` até `0.50`) intencionalmente, para provar que a capacidade de absorção do broker RabbitMQ continua viável ao acúmulo de requisições, enquanto que o Consumer fará o "drag-out" lento e sistemático de acordo com a sua capacidade.
- 
-### 💡 Evolução e Possíveis Melhorias 
+
+### Evolução de Performance (Testes de Carga Real)
+
+Durante o desenvolvimento, a aplicação foi submetida a testes de estresse utilizando o **K6** em ambiente local restrito, visando validar o impacto das otimizações arquiteturais. Os avanços seguiram uma linha de refinamento de código agressiva sem tocar no hardware:
+
+#### Etapa 1: Gargalo Inicial via Gin e RabbitMQ
+No primeiro teste, mirando uma carga alta de **5.000 requisições por segundo (RPS)**, provamos que o sistema "sequestrou" seu próprio processamento. O servidor perdeu vazão, o *logger* nativo e o enfileiramento linear estrangularam chamadas:
+- Ocorreram praticamente **88% de falhas** e timeouts para `localhost` (atingindo o teto do k6 com as requisições aguardando).
+- O backend só conseguiu resolver cerca de 12% das transações simultâneas.
+
+![Teste Falho Inicial (5k RPS)](./test_fail_5k_requests.png)
+
+#### Etapa 2: Refatoração para Ultra Concorrência (MultiWorkers e AMQP Pool)
+Após constatações da falha prematura, executamos implementações críticas nos microserviços. Do lado da API, removemos o Logger, aliviamos a extração de *Marshal/Unmarshal* das *Structs* JSON e estabelecemos um mecanismo de Multiplexação de canais (uma _Pool_ contendo *100 Channels*). No lado do Worker as inserções ao banco foram transformadas em _Prepared Statements_ processadas em massa por **50 Goroutines em concorrência**, absorvendo enormes lotes contínuos vindo diretamente do broker.
+- Sob o mesmo crivo severo dos **5.000 RPS**, a aplicação multiplicou sua resiliência drásticamente.
+- A taxa de requisições aceitas **saltou para 65%**, suportando uma vazão estabilizada de `~1.150` iterações por segundo sem falhas primárias nas bibliotecas. 
+
+![Teste Parcialmente Sucesso (5k RPS)](./test_partially_succeeded_5k_request.png)
+
+#### Etapa 3: Estabilidade Absoluta Dimensionada
+Como nossa infraestrutura era restrita à simulação num container Docker hosteado via WSL2 (com restrições forçadas de meros `0.25` cpus em compose), estabilizamos a geração de tráfego numa rampa "mais realística" ao contexto de uma pequena instância operando em borda: uma meta de **1.000 RPS**.  Sob condições ajustadas aos poderes otimizados em banco e memória _app_:
+- Recebemos gloriosos **100.00% de testes bem-sucedidos**.
+- Média final constante trafegando em **~1000 RPS (iter/s reais)** sem uma quebra sequer (0 Drop) entre k6, API, e o Consumidor.
+
+![Teste de Fluxo Perfeito (1k RPS)](./test_succeesed_1k_requests.png)
+
+### Arquitetura e Possíveis Melhorias Futuras 
 - **Bulk Inserts System:** O consumidor no Go está inserindo os registros unicamente e individualmente conforme consume do `delivery` (linha-a-linha de execução no SQL), o que em um volume massivo força IOPS de Database absurdos. A aplicação Consumer poderia ser atualizada agregando um "Batched Buffer" — acumulando X eventos em instâncias num *Slice* e realizando o descarrego das informações para o Postgres utilizando Múltiplos Value Inserts.
 - **Auto-Scaling no Consumer:** Em um provisionamento baseado em Kubernetes, a API principal permaneceria estabilizada, mas através de gatilhos acionados pela "Queue Depth" (tamanho da fila do RabbitMQ), mais pods sub-relacionados ao "Consumer" poderiam ser "spawandos", secando rapidamente as restrições da fila e se desligando logo em seguida, baixando a volumetria de hardware final do Datacenter em períodos inativos. 

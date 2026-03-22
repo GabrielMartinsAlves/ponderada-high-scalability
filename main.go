@@ -122,7 +122,7 @@ func main() {
 	defer rabbitConn.Close()
 	defer rabbitCh.Close()
 
-	// Use gin.New() instead of gin.Default() to avoid the default Logger middleware, 
+	// Use gin.New() instead of gin.Default() to avoid the default Logger middleware,
 	// which is a huge bottleneck (writes every request to stdout synchronously).
 	r := gin.New()
 	r.Use(gin.Recovery())
