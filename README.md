@@ -89,9 +89,17 @@ Após constatações da falha prematura, executamos implementações críticas n
 ![Teste Parcialmente Sucesso (5k RPS)](./test_partially_succeeded_5k_request.png)
 
 #### Etapa 3: Estabilidade Absoluta Dimensionada
-Como nossa infraestrutura era restrita à simulação num container Docker hosteado via WSL2 (com restrições forçadas de meros `0.25` cpus em compose), estabilizamos a geração de tráfego numa rampa "mais realística" ao contexto de uma pequena instância operando em borda: uma meta de **1.000 RPS**.  Sob condições ajustadas aos poderes otimizados em banco e memória _app_:
-- Recebemos gloriosos **100.00% de testes bem-sucedidos**.
-- Média final constante trafegando em **~1000 RPS (iter/s reais)** sem uma quebra sequer (0 Drop) entre k6, API, e o Consumidor.
+Como nossa infraestrutura era restrita à simulação num container Docker hosteado via WSL2 (com restrições forçadas de meros `0.25` cpus em compose), estabilizamos a geração de tráfego numa rampa "mais realística" ao contexto de uma pequena instância operando em borda: uma meta de **1.000 RPS**.  Sob condições ajustadas aos poderes otimizados em banco e memória *app*, extraímos os seguintes dados finais absolutos:
+
+- **Taxa de Sucesso:** `100.00%` das requisições atingiram status `202` (60.000 chamadas bem-sucedidas de um total de 60.000 validadores).
+- **Vazão (Throughput):** `1000.12 requisões/s` processadas perfeitamente, com 0 falhas e 0 iterações em "Drop".
+- **Volumetria de Dados:** O sistema consumiu cerca de `17 MB` de dados enviados (286 kB/s) e `10 MB` recebidos (171 kB/s) no teste.
+- **Tempos de Resposta (Latências - `http_req_duration`):**
+  - **Média:** `7.87 ms` - incrivelmente rápido, atestando o não engasgo da API.
+  - **Mediana:** `1.5 ms` - sinal de que na maior parte do tempo a transição serializada pra fila durou menos de 2 milissegundos.
+  - **P90/P95:** `25.06 ms` / `40.15 ms` - latência irrisória mesmo no pico de gargalo (95% dos usuários demoraram no máximo 40ms para ter a gravação aceita e finalizada na API).
+  - **Máxima Absoluta:** O pico máximo medido foi de `153.74 ms`.
+- **Uso Estabilizado de Virtual Users (VUs):** Devido à altíssima velocidade do Gin conectado ao pool do AMQP, quase não houve necessidade de paralelizar *threads* no K6. A média manteve-se em esmagatórios `2 VUs` ativos por ciclo alcançando um máximo de pífios `40 VUs` pra preencher a cota de 1.000 chamadas simultâneas.
 
 ![Teste de Fluxo Perfeito (1k RPS)](./test_succeesed_1k_requests.png)
 
